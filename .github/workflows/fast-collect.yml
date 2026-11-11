@@ -1,0 +1,60 @@
+name: Fast Collect
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Shanghai
+      GIST_PAT: ${{ secrets.GIST_PAT }}
+      CUSTOMIZE_LINK: ${{ secrets.CUSTOMIZE_LINK }}
+      ENABLE_SPECIAL_PROTOCOLS: ${{ vars.ENABLE_SPECIAL_PROTOCOLS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Prepare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: pip
+      - name: Install dependencies
+        run: pip3 install -r requirements.txt
+      - name: Create separate output Gist
+        env:
+          GH_TOKEN: ${{ secrets.GIST_PAT }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'GIST_PAT is missing'; exit 1; }
+          printf '%s' '{"description":"Aggregator fast collect output","public":false,"files":{"README.txt":{"content":"Aggregator fast collection output"}}}' > "$RUNNER_TEMP/gist-request.json"
+          gh api --method POST /gists --input "$RUNNER_TEMP/gist-request.json" > "$RUNNER_TEMP/gist-response.json"
+          id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/gist-response.json")
+          owner=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner"]["login"])' "$RUNNER_TEMP/gist-response.json")
+          echo "::add-mask::$id"
+          echo "GIST_LINK=$owner/$id" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/fast-output"
+          printf '%s/%s\n' "$owner" "$id" > "$RUNNER_TEMP/fast-output/gist-link.txt"
+          rm -f "$RUNNER_TEMP/gist-response.json"
+      - name: Preserve output address
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-collect-output-address
+          path: ${{ runner.temp }}/fast-output/gist-link.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Collect recent pages
+        run: python -u subscribe/collect.py --all --overwrite --skip --pages 5 --skip-captcha
+      - name: Verify output exists
+        env:
+          GH_TOKEN: ${{ secrets.GIST_PAT }}
+        run: |
+          set -euo pipefail
+          id=${GIST_LINK#*/}
+          gh api "/gists/$id" --jq '.files | keys[]' > "$RUNNER_TEMP/fast-output/files.txt"
+          if ! grep -Eq '^(clash\.yaml|v2ray\.txt|singbox\.json)$' "$RUNNER_TEMP/fast-output/files.txt"; then
+            echo 'No subscription output was written to the Gist.' >&2
+            exit 1
+          fi
+          echo 'Subscription output exists in the separate Gist.'
